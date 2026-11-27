@@ -1,0 +1,314 @@
+---
+title: "506-final project"
+author: "Zhixuan Li"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+# change workload
+```{r}
+setwd("/Users/li-zhixuan/Desktop/26 winter/506/506-final-project")
+getwd()
+```
+
+# packages
+```{r}
+library(tidyverse)
+library(MASS)      
+library(broom)     
+library(ggplot2)   
+library(scales)
+library(stringr)
+library(janitor) 
+library(broom)
+library(stringr)
+library(ggplot2)
+```
+
+# Data Preprocessing
+
+### 1. Read data
+```{r}
+df_raw <- read_csv(
+  "Police_Department_Incident_Reports__2018-2019_to_Present_20261123.csv",
+  show_col_types = FALSE
+)
+
+```
+
+### 2. Check raw resolution values
+```{r}
+cat("=== Raw Resolution values ===\n")
+print(table(df_raw$Resolution, useNA = "always"))
+```
+
+### 3. Clean and preprocess
+```{r}
+df_clean <- df_raw %>%
+  clean_names() %>%
+  filter(incident_year %in% c(2018, 2019)) %>%
+  filter(police_district != "Out of SF") %>%
+  mutate(
+    year = factor(incident_year),
+    month = factor(
+      format(as.Date(incident_date, format = "%Y/%m/%d"), "%m")
+    ),
+    district = factor(as.character(police_district)),
+    category = factor(incident_category),
+    
+    resolved_binary = case_when(
+      resolution %in% c("Cite or Arrest Adult", "Exceptional Adult") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    category_grouped = fct_lump(
+      category,
+      n = 10,
+      other_level = "OTHER"
+    )
+  )
+
+```
+
+### 4. Check outcome distribution
+```{r}
+cat("\n=== Resolution status distribution ===\n")
+table(df_clean$resolved_binary)
+```
+
+### 5. Check missing categories
+```{r}
+cat("\n=== Missing crime categories ===\n")
+sum(is.na(df_clean$category_grouped))
+```
+
+### 6. Check sample size
+```{r}
+cat("\n=== Cleaned sample size ===\n")
+nrow(df_clean)
+```
+
+
+# Q1
+### Exclude missing crime category
+```{r}
+df_model <- df_clean %>%
+  filter(!is.na(category_grouped))
+
+```
+
+### Aggregate incident counts
+```{r}
+df_counts <- df_model %>%
+  count(
+    district,
+    year,
+    month,
+    category_grouped,
+    name = "crime_count"
+  ) %>%
+  complete(
+    district,
+    year,
+    month,
+    category_grouped,
+    fill = list(crime_count = 0)
+  ) %>%
+  mutate(
+    district = relevel(district, ref = "Bayview")
+  )
+
+
+```
+
+### Check total number of combinations & Fit model
+```{r}
+nrow(df_counts)
+# Fit Negative Binomial model
+model_nb <- glm.nb(
+  crime_count ~ district + year + month + category_grouped,
+  data = df_counts
+)
+
+summary(model_nb)
+
+```
+
+### Extract IRR and confidence intervals
+```{r}
+res_nb_new <- tidy(
+  model_nb,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(str_detect(term, "^district")) %>%
+  mutate(
+    district = str_remove(term, "^district"),
+    sig = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01 ~ "**",
+      p.value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  ) %>%
+  dplyr::select(
+    district,
+    IRR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high,
+    p.value,
+    sig
+  ) %>%
+  arrange(IRR)
+
+print(res_nb_new, n = Inf)
+
+```
+
+### Forest plot
+```{r}
+
+plot_nb <- ggplot(
+  res_nb_new,
+  aes(x = IRR, y = reorder(district, IRR))
+) +
+  geom_point(aes(color = sig), size = 3) +
+  geom_errorbar(
+    aes(
+      xmin = CI_low,
+      xmax = CI_high,
+      color = sig
+    ),
+    width = 0.2,
+    linewidth = 1,
+    orientation = "y"
+  ) +
+  geom_vline(
+    xintercept = 1,
+    linetype = "dashed",
+    color = "gray50"
+  ) +
+  scale_x_log10() +
+  labs(
+    title = "Adjusted Incident Count Ratios by Police District",
+    x = "Incident Count Ratio (Log Scale)",
+    y = "Police District",
+    color = "Significance"
+  ) +
+  theme_minimal()
+
+print(plot_nb)
+
+ggsave(
+  "plot_district_irr_updated.png",
+  plot_nb,
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+levels(df_counts$district)
+```
+
+# Q2: Logistic Regression 
+### Fit logistic regression model
+```{r}
+model_logit <- glm(
+  resolved_binary ~ category_grouped + district + year,
+  data = df_model,
+  family = binomial(link = "logit")
+)
+
+```
+
+### Check model results
+```{r}
+
+summary(model_logit)
+
+```
+
+### Extract odds ratios and 95% confidence intervals
+```{r}
+res_logit <- tidy(
+  model_logit,
+  exponentiate = TRUE,
+  conf.int = TRUE
+) %>%
+  filter(str_detect(term, "^category_grouped")) %>%
+  mutate(
+    term = str_remove(term, "^category_grouped"),
+    sig = ifelse(
+      p.value < 0.05,
+      "Significant",
+      "Not Significant"
+    )
+  )
+
+```
+
+### Print results
+```{r}
+print(res_logit, n = Inf)
+```
+
+### Q2 Logistic Regression Forest Plot
+```{r}
+plot_logit <- ggplot(
+  res_logit,
+  aes(x = estimate, y = reorder(term, estimate))
+) +
+  geom_point(
+    aes(color = sig),
+    size = 3
+  ) +
+  geom_errorbar(
+    aes(
+      xmin = conf.low,
+      xmax = conf.high,
+      color = sig
+    ),
+    width = 0.2,
+    linewidth = 1,
+    orientation = "y"
+  ) +
+  geom_vline(
+    xintercept = 1,
+    linetype = "dashed",
+    color = "gray50"
+  ) +
+  scale_x_log10() +
+  labs(
+    title = "Odds Ratios of Resolution by Crime Category",
+    x = "Odds Ratio (Log Scale)",
+    y = "Crime Category",
+    color = "Significance"
+  ) +
+  theme_minimal()
+
+```
+
+### Display plot
+```{r}
+print(plot_logit)
+
+```
+
+### Save plot
+```{r}
+ggsave(
+  "plot_category_or.png",
+  plot_logit,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+```
+
+### Check category reference levels
+```{r}
+levels(df_model$category_grouped)
+```
+
